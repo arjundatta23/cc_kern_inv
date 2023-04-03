@@ -1,6 +1,5 @@
 # cc_kern_inv
-A seismological code in Python: ambient noise cross-correlation source-structure kernels and inversion
-This is a package for full waveform ambient noise inversion for sources or structure: 
+A seismological code in Python: this is a package for full waveform ambient noise inversion for sources or structure. Overview of directory structure:
 
 - the source inversion code is in "anseicca". 
 - structure inversion code is under development.
