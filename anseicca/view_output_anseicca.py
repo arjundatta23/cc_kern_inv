@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 # Custom modules
 sys.path.append('../modules_common')
 sys.path.append(os.path.expanduser('~/Research/code_own/cc_kern_inv/modules_common'))
-import new_read_pickle_output as rpo
+import read_pickle_output as rpo
 
 ################################################################################
 # PLOTTING FUNCTIONS
@@ -506,23 +506,33 @@ class inversion_progress_plots:
 
 	def mod_iter(self, kcao_sditer, mod_min, mod_max):
 
-		fig=plt.figure()
+		fig=plt.figure(figsize=(8,7))
 		#pub = numit-1
 		#for p in range(pub):
+		rows=4
+		cols=4
+		axall = fig.subplots(rows,cols,sharex=True,sharey=True)
 		for p in range(numit):
 			#it=p+1
 			#spname = "k=%d" %(it)
 			spname = "k=%d" %(p)
+			r=p//cols
+			c=p%cols
 			try:
-				axsp=fig.add_subplot(4,4,p+1) #,aspect='equal')
+				axsp = axall[r,c]
+			except IndexError:
+				print("Iteration number %d not plotted" %(p))
 			except ValueError:
 				print("Problem plotting inversion result for iteration >= %d. Mismatch between number of iterations and number of subplots." %(p))
 				return
-			cax=axsp.pcolor(kcao_gx,kcao_gy,kcao_sditer[p,:,:],cmap=plt.cm.jet,vmin=mod_min,vmax=mod_max)
-			axsp.text(0.8,0.85,spname,transform=axsp.transAxes,color='white')
-			#axsp.set_title(spname)
-			#if p==pub-1:
-			#	plt.colorbar(cax,ax=axsp,orientation="horizontal")
+			else:
+				sditer_norm = kcao_sditer/np.amax(rapo.kcao_sdinv)
+				# cax=axsp.pcolor(kcao_gx,kcao_gy,kcao_sditer[p,:,:],cmap=plt.cm.jet,vmin=mod_min,vmax=mod_max)
+				axsp.pcolor(kcao_gx,kcao_gy,sditer_norm[p,:,:],cmap=plt.cm.Greys,vmin=0,vmax=1)
+				axsp.text(0.7,0.05,spname,transform=axsp.transAxes)#,color='white')
+				#axsp.set_title(spname)
+				#if p==pub-1:
+				#       plt.colorbar(cax,ax=axsp,orientation="horizontal")
 
 ###############################################################################################################
 
@@ -676,7 +686,7 @@ for p, pfile in enumerate(filelist):
 
 	rapo = rpo.read_anseicca_pickle(pfile)
 
-	cg_dom_geom=rapo.cg_dom_geom
+	dom_geom_pckl = rapo.cg_dom_geom
 	# variable required for use in u1
 
 	if p==0:

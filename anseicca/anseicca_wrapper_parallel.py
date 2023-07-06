@@ -21,7 +21,6 @@ sys.path.append('../modules_common')
 # path to the modules which are common to the cc source- and structure-inversion codes
 sys.path.append(os.path.expanduser('~/code_general/modules.python'))
 # path to the "SW1D_earthsr" set of modules
-sys.path.append(os.path.expanduser('~/code_general/wav_prop_numerical'))
 
 #------------------------------------------------- Initialize MPI process ------------------------------------------------------
 comm_out = MPI.COMM_WORLD
@@ -31,11 +30,10 @@ numproc_out = comm_out.Get_size()
 # Custom modules: set 1
 import utils_io as uio
 import config_file as config
-import cctomo_utils2 as u2
-import read_velocity_models as u0
 
 #*********************************************** Parameters from config file ****************************************************
 use_reald = config.ext_data
+nrecs_select = config.nrecs # no. of stations/receivers to use
 
 dg = config.dom_geom
 origx = dg.grid_origx
@@ -64,9 +62,7 @@ if rank_out==0:
 
 	#--------------------------------- Station/receiver network and modelling geometry ---------------------------------------------
 	coordfile="INPUT/receivers.csv"
-	nrecs_select = 5
-
-	stno, stid, stx, sty = u1.read_station_file(coordfile)
+	stno, stid, stx, sty = uio.read_station_file(coordfile)
 
 	try:
 		assert stno[-1] == len(stid)
@@ -85,7 +81,7 @@ if rank_out==0:
 		raise SystemExit("Quitting - number of receivers (%d) incompatible with number of processors (%d)" \
 		 %(nrecs_select, numproc_out))
 
-	smdo = u2.setup_modelling_domain(stno, stid, stx, sty, origx, origy, nrecs_select, False)
+	smdo = u1.setup_modelling_domain(stno, stid, stx, sty, origx, origy, False)
 
 	#-------------------------------- Data reading (if relevant) and temporal signal attributes of data/synthetics ----------------------------------
 
@@ -95,30 +91,22 @@ if rank_out==0:
 		oam = None
 		obsdata = None
 		avail_data_dummy = 1 - np.eye(nrecs_select)
-		obsdata_info = (avail_data_dummy, None, None)
+		obsdata_info = (avail_data_dummy, None, None, None)
 	else:
 	# EXTERNAL (REAL) DATA CASE
-		data_format = {1: 'binary_archive_python', 2: 'individual_files_ccpairs'}
-		data_loc = "INPUT/DATA/stack_100_rotated_zz.npz"
-		df = int(input("Data format: \n1. Archive (Python Binary)\n 2. Individual files\n: "))
-
-		usrc_resamp = float(input("Resample data? (0 if no, dew dt in seconds if yes): "))
-		new_dt = None if usrc_resamp==0 else usrc_resamp
+		import cctomo_utils2 as u2
 
 		try:
-			rdo=u2.cc_data.Read(data_loc, data_format[df], new_dt)
-			mdo=u2.cc_data.MatrixForm(nrecs_select)
-			pdo=u2.cc_data.Process(wspeed, nrecs_select, mdo.nmissing)
+			rdo=u2.cc_data.Read(smdo.chosen_st_id, smdo.chosen_st_no, uioo.data_loc, uioo.data_fmt, uioo.new_dt, uioo.fext)
+			mdo=u2.cc_data.MatrixForm()
+			pdo=u2.cc_data.Process(smdo.act_dist_rp, wspeed, mdo.nmissing)
+			edo=u2.cc_data.Errors(pdo.snr)
 		except Exception as e:
 			print(e)
 			raise SystemExit("Problem with data read/preparation/processing; program aborted.")
 
-		# azstep=4
-		# edo=u2.cc_data.Errors(nrecs_select,azstep)
-
 		obsdata = pdo.use_data
-		# obsdata_info = (mdo.act_dist_rp, pdo.snr, edo.DelE)
-		obsdata_info = (mdo.mark_avail_data, pdo.snr, (pdo.lefw, pdo.rigw))
+		obsdata_info = (mdo.mark_avail_data, pdo.snr, edo.esnrpd_ltpb, (pdo.lefw, pdo.rigw))
 
 		# override signal parameters set in the config file
 		sig_att = config.SignalParameters()
@@ -131,7 +119,7 @@ if rank_out==0:
 		sig_att.pst = 3
 
 		sig_att.essentials()
-		sso = u1.source_spectrum(obsdata)
+		sso = u2.source_spectrum(obsdata)
 		try:
 			oam, sig_att.pow_spec_sources = sso.match_obs_spectra(sig_att.nsam, sig_att.fhz, mdo.nmissing)
 		except Exception as e:
@@ -156,10 +144,10 @@ if rank_out==0:
 	try:
 		cso = val.check_settings(sig_att, smdo.dist_1Darr)
 		cso.time_series_length()
-		# cso.dc_comp_spectrum()
+		cso.dc_comp_spectrum()
 
 		mro = val.memory_reqt(sig_att, user_choices['nz'])
-		mro.source_kern(nrecs_select)
+		mro.source_kern()
 	except Exception as e:
 		print(e)
 		raise SystemExit("Problem with settings, program aborted.")
@@ -186,7 +174,6 @@ import hans2013_parallel as h13
 iter_only1=False
 
 # Broadcast variables computed on master processor but required on all processors
-# nr = comm_out.bcast(num_chosen,root=0)
 sigatt = comm_out.bcast(sig_att, root=0)
 rc_xp = comm_out.bcast(rchosenx_igp, root=0)
 rc_yp = comm_out.bcast(rchoseny_igp, root=0)
@@ -201,4 +188,4 @@ if rank_out==0:
 	# if do_inv:
 	# Inversion has been run (at least one iteration)
 	print("\nStoring the result...")
-	u2.post_run(0, sig_att, 0, oam, obsdata_info[0], osmd=smdo, oica=icao)
+	uio.post_run(0, sig_att, 0, oam, obsdata_info[0], osmd=smdo, oica=icao)

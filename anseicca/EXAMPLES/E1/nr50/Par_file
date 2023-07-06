@@ -1,0 +1,186 @@
+################################################################################
+# Constants
+################################################################################
+[CONSTANTS]
+epsilon=1e-6
+
+################################################################################
+# Data availability
+################################################################################
+[BASICS]
+nrecs = 50
+ext_data = False
+# whether the 'data' used in the code is generated internally (e.g. synthetic tests), or taken from an external source (e.g. real data)
+
+#*******************************************************************************
+# Geometrical setup
+#*******************************************************************************
+[DOM_GEOM]
+
+dx = 0.5
+zmax = 0
+domain_size = 50.
+# coordinate origin of the modelling domain (km units)
+grid_origx = 406
+grid_origy = 8504
+# these are ballpark values, chosen such that the origin lies roughly at the network centre
+
+rec_loc_grid_points = 20
+
+################################################################################
+# Parameters pertaining to cross-correlation modelling theory
+################################################################################
+[CCMT]
+src_dir = z
+cc_component_RTZ = 8
+
+################################################################################
+# Parameters pertaining to inversion
+################################################################################
+[INVC]
+gamma_inv = 0.1
+
+################################################################################
+# Parameters pertaining to internally generated data (synthetic tests)
+################################################################################
+[SYN_DATA]
+noise_amp_pcent = 0
+noise_band = 0.05 1.0
+outer_box_size_factor = 2
+
+################################################################################
+# Parameters for acoustic/scalar wave equation modelling
+################################################################################
+[SCAL_MOD]
+density = 1.00
+wavespeed = 2.0
+
+#*******************************************************************************
+# Signal characteristics
+#*******************************************************************************
+[SIGNAL_CHAR]
+
+# sampling interval
+dt = 0.1
+# number of samples
+num_samples = 600
+# power spectrum type; see associated function below
+pow_spec_type = 1
+# ---- Parameters relevant to a GAUSSIAN spectrum
+# centre frequency
+freq_centre = 0.2
+# width (sigma) for gaussian spectrum as a fraction of centre frequency
+freq_bw_frac = 4
+# ---- Parameters relevant to a TUKEY spectrum
+# lower bound frequency
+freq_lb = 0.1
+# upper bound frequency
+freq_ub = 1.0
+# alpha parameter for Tukey window in spectral domain from lf to hf
+tukey_alpha = 0.1
+
+################################################################################
+# For SOURCE INVERSION only
+################################################################################
+[SOMOD]
+
+# -1: 'every grid point'
+# 0: 'multiple gaussians'
+# 1: 'ring of gaussians'
+# 2: 'radially gaussian rings'
+# 3: 'gaussian grid'
+
+# source model type
+src_mod_type_testdata = 2
+src_mod_type_inversion = 3
+
+# structure model
+struc_lat_homo_testdata = True
+struc_lat_homo_inversion = True
+
+# forward modelling options LEVEL 1
+# 0: Analytical
+# 1: Numerical
+
+modelling_level1_testdata = 0
+modelling_level1_inversion = 0
+
+# forward modelling options LEVEL 2
+# When LEVEL 1 is analytical then LEVEL 2:
+#       0: Acoustic
+#       1: Elastic
+# When LEVEL 1 is numerical then LEVEL 2:
+#       0: Frequency domain solver
+#       1: Time domain solver
+
+modelling_level2_testdata = 0
+modelling_level2_inversion = 0
+
+# SPECIFICATIONS: 'multiple gaussians'
+# (x,y) coordinates of 2-D gaussian centres
+somod_mg_specs_r0_x = -18 18 0 0
+somod_mg_specs_r0_y = 0 0 -18 18
+# (x,y) widths of 2-D gaussians (km)
+somod_mg_specs_w_x = 15 15 15 15
+somod_mg_specs_w_y = 15 15 15 15
+# magnitude
+somod_mg_specs_mag = 8 5 5 8
+
+# SPECIFICATIONS: 'ring of gaussians'
+# radius (km)
+somod_rg_specs_r = 20
+# width (km)
+somod_rg_specs_w = 5
+# basis angular sampling (degrees)
+somod_rg_specs_as = 10
+# number of perturbed segments
+somod_rg_specs_np = 3
+# segment start (degrees)
+somod_rg_specs_t1= 130 220 345 30
+# segment end (degrees)
+somod_rg_specs_t2 = 150 240 15 50
+# segment perturbation (additive)
+somod_rg_specs_pert = 3 2 2
+
+# SPECIFICATIONS: 'radially gaussian rings'
+# (x,y) coordinates of ring centres
+somod_rgr_specs_r0_x = -105 -55
+somod_rgr_specs_r0_y = 30 75
+# ring radii (km)
+somod_rgr_specs_r = 113 75
+# ring widths (km)
+somod_rgr_specs_w = 5 5
+# ring magnitudes
+somod_rgr_specs_mag = 3 3
+
+# SPECIFICATIONS: 'gaussian grid'
+# width (km)
+somod_gg_specs_w = 5.0
+# basis linear sampling (km)
+somod_gg_specs_ls = 2.0
+# perturbed coordinates [x,y]
+somod_gg_specs_pos_x = 15 -12.5 5
+somod_gg_specs_pos_y = 15 -22.5 7.5
+# number of perturbations
+somod_gg_specs_np = 2
+# lower limit of gaussian array along the row
+somod_gg_specs_x_l = 1 6 11
+# upper limit of gaussian array along the row
+somod_gg_specs_x_u = 3 7 11
+# lower limit of gaussian array along the column
+somod_gg_specs_y_l = 1 8 12
+# upper limit of gaussian array along the column
+somod_gg_specs_y_u = 2 10 12
+# magnitude
+somod_gg_specs_mag = 10 5 8
+
+
+################################################################################
+# For STRUCTURE INVERSION/KERNELS only
+################################################################################
+[STRUC_INV]
+
+# 0: Traveltime (cross-correlation traveltime)
+# 1: Amplitude
+
+kernel_measurement = 0

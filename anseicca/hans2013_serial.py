@@ -14,8 +14,6 @@ if __name__ == '__main__':
     # path to common modules for the cc source and structure inversion codes
     sys.path.append(os.path.expanduser('~/code_general/modules.python'))
     # path to the "SW1D_earthsr" set of modules
-    sys.path.append(os.path.expanduser('~/code_general/wav_prop_numerical'))
-    # path to the "Helmholtz_equation_FD" and "devito_solvers_TD" modules
 
 # Custom modules (unconditional set1)
 import config_file as config
@@ -159,27 +157,26 @@ class inv_cc_amp:
         self.nom = self.signal.nsam
         self.deltat = self.signal.dt
         self.f0 = self.signal.cf
-        # self.lf = self.signal.lf
-        # self.hf = self.signal.hf
-        altuk = self.signal.altukey
 
         self.t = self.signal.tt
         self.fhz = self.signal.fhz
-        self.fpos_pow = self.signal.fhz_pow_pos
         self.dom = self.signal.domega
         self.omega = self.signal.omega_rad
         self.nom_nneg = self.signal.n_nn_fsam
-        self.pss = self.signal.pow_spec_sources
-        # print("From h13 (self.t):")
-        # print(self.t)
 
+        self.pss = self.signal.pow_spec_sources
+        self.fpos_pow = config.sig_thresh_dB(self.fhz, self.pss)
+        self.lf = self.fpos_pow[0]
+        self.hf = self.fpos_pow[-1]
+        
         self.data_availability = dobs_info[0]
-        self.snr_val =  dobs_info[1]
-        self.meas_win = dobs_info[2]
+        self.snr_val = dobs_info[1]
+        self.esnr = dobs_info[2]
+        self.meas_win = dobs_info[3]
 
         npairs_total = int(self.nrecs*(self.nrecs-1)/2)
-        npairs_use = np.nonzero(np.tril(self.data_availability))[0].size
-        self.npfwdm = npairs_total - npairs_use
+        self.npairs_use = np.nonzero(np.tril(self.data_availability))[0].size
+        self.npfwdm = npairs_total - self.npairs_use
         # npfwdm -> number of pairs for which data missing
 
         if not (dobs is None):
@@ -202,9 +199,6 @@ class inv_cc_amp:
 
         # compute_cc = {True: self.compute_cc_lathomo, False: self.compute_cc_lathet}
 
-        self.dvar_pos = np.ones(npairs_use)
-        self.dvar_neg = np.ones(npairs_use)
-
         self.rlocsx = rlocsx*dx
         self.rlocsy = rlocsy*dx
 
@@ -213,10 +207,8 @@ class inv_cc_amp:
             self.fwd_prep()
 
         self.num_mparams=self.basis.shape[0]
-        # self.distribs_inv=np.copy(self.distribs_start)
         self.allit_mc = []
         self.allit_misfit = []
-        # self.allit_synenv = []
         self.allit_syncross = []
         self.flit_indmis_p = []
         self.flit_indmis_n = []
@@ -243,176 +235,42 @@ class inv_cc_amp:
             if itnum==0:
                 assert np.allclose(self.distribs_inv, self.distribs_start)
 
-            # self.syncross = np.zeros((self.nom, self.nrecs, self.nrecs))#, dtype='complex')
             self.syncross_tensor = np.zeros((3, 3, self.nom, self.nrecs, self.nrecs), dtype='complex')
-            # self.syncross_aspec = np.zeros(self.obscross.shape)
 
             #*************** inversion-related variables
-            self.Gmat_pos=np.zeros((npairs_use,self.num_mparams))
-            self.Gmat_neg=np.zeros((npairs_use,self.num_mparams))
-
-            self.deltad_pos=np.zeros(npairs_use)
-            self.deltad_neg=np.zeros(npairs_use)
+            self.Gmat_pos=np.zeros((self.npairs_use,self.num_mparams))
+            self.Gmat_neg=np.zeros((self.npairs_use,self.num_mparams))
 
             mfit_kern_pos = np.zeros((ngpmb, ngpmb))
             mfit_kern_neg = np.zeros((ngpmb, ngpmb))
             # mfit_kern -> misfit_kernel
 
-            #*************** compute cross-correlations and make measurements
+            #*************** compute cross-correlations and data misfit
             if (not config.ext_data) and (itnum==0):
             # SYNTHETIC TEST (INTERNAL DATA) CASE, compute "observed data" synthetically
-                # compute_cc[lat_homo_tru]('obs')
                 self.compute_cc_ptsources(lat_homo_tru, 'obs', itnum)
 
-            # compute_cc[lat_homo_inv]('pre')
             self.compute_cc_ptsources(lat_homo_inv, 'pre', itnum)
-            self.make_measurement()
+            self.make_measurement(itnum)
+            total_misfit = self.compute_misfit(itnum)
 
-            print("Starting computation of source kernels for each receiver pair...")
-            cp=0 # cp -> count_pair
-            for j in range(self.nrecs-1):
-                for i in range(j+1,self.nrecs):
-                    # print("...receivers ", i,j)
-                    if self.data_availability[i,j] == 0:
-                        print("...skipping receivers ", i,j)
-                        pass
-                    else:
-                        sker_p, sker_n = self.diffkernel(i,j)
-                        # Computing individual source kernels (eq. 15)
-
-                        # build the G-matrix
-                        if use_basis:
-                            kb_prod = sker_p * self.basis * 2*iter_mc[:,None,None]
-                            self.Gmat_pos[cp,:] = np.sum(kb_prod, axis=(1,2)) * dx**2
-                            kb_prod = sker_n * self.basis * 2*iter_mc[:,None,None]
-                            self.Gmat_neg[cp,:] = np.sum(kb_prod, axis=(1,2)) * dx**2
-                        else:
-                            self.Gmat_pos[cp,:] = sker_p.flatten()
-                            self.Gmat_neg[cp,:] = sker_n.flatten()
-
-                        if __name__ == '__main__':
-                        	if self.nrecs<nrth and itnum==0:
-                        		self.skers.append(sker_p)
-
-                        with np.errstate(invalid='raise'):
-                        # when 'obsamp' and 'synamp' are both zero, that will raise an "invalid" error (division by 0)
-                            try:
-                                self.deltad_pos[cp] = np.log(self.obsamp_pos[i,j]/self.synamp_pos[i,j])
-                                # print("obsamp_pos and synamp_pos for receivers ", i, j, self.obsamp_pos[i,j], self.synamp_pos[i,j])
-                                # Computing misfit kernels, i.e. eq. 30 (positive branch)
-                                mfit_kern_pos += sker_p * self.deltad_pos[cp]
-
-                                self.deltad_neg[cp] = np.log(self.obsamp_neg[i,j]/self.synamp_neg[i,j])
-                                # print("obsamp_neg and synamp_neg for receivers ", i, j, self.obsamp_neg[i,j], self.synamp_neg[i,j])
-                                # Computing misfit kernels, i.e. eq. 30 (negative branch)
-                                mfit_kern_neg += sker_n * self.deltad_neg[cp]
-
-                            except (FloatingPointError, ZeroDivisionError) as e:
-                                # this SHOULD NOT HAPPEN
-                                # 'obsamp_pos/neg' as well as 'synamp_pos/neg' should be non-zero for the station pairs considered here
-                                raise SystemExit("Problem computing data misfit - unexpected zero values")
-
-                        # print("CHECK sker (pairwise source kernels): ")
-                        # print(cp, np.sum(sker_p))
-                        # print("CHECK deltad_pos (pairwise): ")
-                        # print(cp, self.deltad_pos[cp])
-                        cp+=1
-
-            # print("CHECK deltad (total): ")
-            # print(np.sum(self.deltad_pos), np.sum(self.deltad_neg))
-            # print("CHECK mfit_kern: ")
-            # print(np.sum(mfit_kern_pos), np.sum(mfit_kern_neg))
-
-            #*********** things to do on first iteration
-            if itnum==0:
-                if self.reald:
-                # complete the calculation of the data errors. NB: we consider two types of error.
-                # The first one (energy decay) is independent of the measurements and is already computed.
-                # The second (SNR) is defined relative to the measurements, so we must compute the absolute values here.
-
-                    dvar_snr_pos = np.square(self.esnrpd_ltpb * self.obsamp_pos)
-                    dvar_snr_neg = np.square(np.transpose(self.esnrpd_ltpb) * self.obsamp_neg)
-
-                    # combine different errors
-                    dvar_pos = dvar_snr_pos #+ self.dvar_egy_ltpb
-                    dvar_neg = dvar_snr_neg #+ np.transpose(self.dvar_egy_ltpb)
-
-                    # print("CHECK dvar (matrix form):")
-                    # print(dvar_pos)
-
-                    zvar_p=np.argwhere(dvar_pos==0)
-                    zvar_n=np.argwhere(dvar_neg==0)
-                    if not (np.all(zvar_p[:,0]<=zvar_p[:,1]) and np.all(zvar_n[:,0]<=zvar_n[:,1])):
-                    # this means there are 0-values in the lower-triangular part of 'dvar_pos/neg' - should be due to missing data only.
-                        ltzv_p=zvar_p[zvar_p[:,0]>zvar_p[:,1]]
-                        ltzv_n=zvar_n[zvar_n[:,0]>zvar_n[:,1]]
-                        if (ltzv_p.shape[0] != self.npfwdm) or (ltzv_n.shape[0] != self.npfwdm):
-                            print(ltzv_p.shape)
-                            print(ltzv_n.shape)
-                            raise SystemExit("Problem with observed data errors - unexpected zero values.")
-
-                    # finally, convert data variance from matrix-form (2D) to vector-form (1D)
-                    dv_mat = {'p': dvar_pos, 'n': dvar_neg}
-                    dv_vec = {'p': self.dvar_pos, 'n': self.dvar_neg}
-                    for br in dv_mat:
-                        count_pair=0
-                        count_zero_err=0
-                        for col in range(dv_mat[br].shape[1]):
-                            for row in range(col+1,dv_mat[br].shape[0]):
-                                if dv_mat[br][row,col]==0:
-                                    count_zero_err+=1
-                                else:
-                                    dv_vec[br][count_pair] = dv_mat[br][row,col]
-                                    count_pair+=1
-
-                        assert count_zero_err==self.npfwdm
-
-                # regardless of real/external or synthetic/internal data, store the first-iteration values of certain quantities
-                self.mfit_kern_pos = mfit_kern_pos
-                self.mfit_kern_neg = mfit_kern_neg
+            self.allit_misfit.append(total_misfit)
+            self.allit_syncross.append(self.syncross)
+            print("TOTAL MISFIT: ", total_misfit)
+            print(self.allit_misfit)
 
             def record_flit():
              	# record inversion progress
                 self.flit_indmis_p.append(self.deltad_pos)
                 self.flit_indmis_n.append(self.deltad_neg)
 
-            # print("CHECK obsamp: ")
-            # print(self.obsamp_pos, self.obsamp_neg)
-            # print("CHECK synamp: ")
-            # print(self.synamp_pos, self.synamp_neg)
-
-            # print("CHECK dvar (vector form): ")
-            # print(self.dvar_pos, self.dvar_neg)
-
-            with np.errstate(invalid='raise', divide='raise'):
-                try:
-                    wmp = self.deltad_pos / np.sqrt(self.dvar_pos)
-                    wmn = self.deltad_neg / np.sqrt(self.dvar_neg)
-                except (ZeroDivisionError, FloatingPointError) as e:
-                    # this should never happen; the data variance vector should not contain any zero-variances,
-                    # because this has been taken care of when creating the vector.
-                    print(e)
-                    print(self.dvar_pos)
-                    print(self.dvar_neg)
-                    raise SystemExit("Problem with data errors vector - contains zero values.")
-
-            total_misfit = 0.5*(np.dot(wmp,wmp) + np.dot(wmn,wmn))
-
             if itnum==0:
             	record_flit()
-            self.allit_misfit.append(total_misfit)
-            self.allit_syncross.append(self.syncross)
-            # self.allit_synenv.append(self.synenv)
-
-            print("TOTAL MISFIT: ", total_misfit)
-            print(self.allit_misfit)
-
-            if itnum==1:
-                if only1_iter:
+            elif itnum==1 and only1_iter:
                 # FORCED STOP FOR TESTING: last misfit stored will correspond to first updated model
-                    forced=True
-                    iterate=False
-                    record_flit()
+                forced=True
+                iterate=False
+                record_flit()
 
             if (itnum>0) and (not forced):
             # determine whether to terminate inversion or iterate further
@@ -428,14 +286,49 @@ class inv_cc_amp:
                         print("Inversion terminated due to increasing misfit.")
 
             if iterate:
+                print("Starting computation of source kernels for each receiver pair...")
+
+                cp=0 # cp -> count_pair
+                for j in range(self.nrecs-1):
+                    for i in range(j+1,self.nrecs):
+                        # print("...receivers ", i,j)
+                        if self.data_availability[i,j] == 0:
+                            print("...skipping receivers ", i,j)
+                            pass
+                        else:
+                            sker_p, sker_n = self.diffkernel(i,j)
+                            # Computing individual source kernels (eq. 15)
+
+                            # build the G-matrix
+                            if use_basis:
+                                kb_prod = sker_p * self.basis * 2*iter_mc[:,None,None]
+                                self.Gmat_pos[cp,:] = np.sum(kb_prod, axis=(1,2)) * dx**2
+                                kb_prod = sker_n * self.basis * 2*iter_mc[:,None,None]
+                                self.Gmat_neg[cp,:] = np.sum(kb_prod, axis=(1,2)) * dx**2
+                            else:
+                                self.Gmat_pos[cp,:] = sker_p.flatten()
+                                self.Gmat_neg[cp,:] = sker_n.flatten()
+
+                            if __name__ == '__main__':
+                                if self.nrecs<nrth and itnum==0:
+                                    self.skers.append(sker_p)
+
+                            # compute the total misfit kernel
+                            mfit_kern_pos += sker_p * self.deltad_pos[cp]
+                            mfit_kern_neg += sker_n * self.deltad_neg[cp]
+
+                            cp+=1
+
+                #*********** things to do on first iteration
+                if itnum==0:
+                    self.mfit_kern_pos = mfit_kern_pos
+                    self.mfit_kern_neg = mfit_kern_neg
+
                 #*********** do actual inversion (model update)
-                self.ido = u2.inversion(self.num_mparams)
+                self.ido = u1.inversion(self.num_mparams)
                 new_mc = self.ido.invert(self.num_mparams, self.basis, self.mc_start, iter_mc,\
                   mfit_kern_pos, mfit_kern_neg, self.Gmat_pos, self.Gmat_neg, self.deltad_pos, self.deltad_neg, self.dvar_pos, self.dvar_neg)
                 self.allit_mc.append(new_mc)
-                # print("CHECK allit_mc (model coefficients): ")
-                # print(self.allit_mc[0])
-                # print(self.allit_mc[-1])
 
                 print("END OF ITERATION %d" %(itnum))
                 itnum+=1
@@ -464,12 +357,10 @@ class inv_cc_amp:
         tdur=self.nom*self.deltat
         # inverse frequency spacing for DFT of time series
         print("tdur as seen by h13 module: ", tdur)
-        # print "Frequency samples are: ", self.fhz
 
-        # # hlbox_omost = omost_fac*hlbox_outer/2.0
         self.ndouble=2*ngpmb-1
 
-        umdo = u2.use_modelling_domain(self.rlocsx, self.rlocsy)
+        umdo = u1.use_modelling_domain(self.rlocsx, self.rlocsy)
         self.dist_rp_grid = umdo.dist_rp
         self.dist_rp_sorted = umdo.alldist_1D
 
@@ -604,7 +495,7 @@ class inv_cc_amp:
             if omost_fac==2:
                 basis_true = init_basis(nbasis[param_mod_tru],ngpmb)
                 self.distribs_true = init_model(ngpmb)
-                # used to generate the synthetic "data" in the absence of real data
+                # used to generate the synthetic "data" to be inverted
                 # this source distribution is NOT involved in computing source kernels
             elif omost_fac==3:
                 basis_true = init_basis(nbasis[param_mod_tru],self.ndouble)
@@ -616,12 +507,6 @@ class inv_cc_amp:
                 basis_true[k,:,:] = sdist_type[param_mod_tru](locator, mod_specs[param_mod_tru], omost_fac)
                 self.distribs_true += (self.mc_true[k]**2) * basis_true[k,:,:]
             self.distribs_true += mag1_true
-
-        if self.reald:
-        # EXTERNAL (REAL) DATA CASE - compute observation errors
-            aeo = u1.assign_errors(self.snr_val)
-            self.esnrpd_ltpb = aeo.snr_error(self.dist_rp_grid)
-            # self.dvar_egy_ltpb = aeo.decay_rate_error()
 
         print("Completed initial setup...")
 
@@ -663,8 +548,6 @@ class inv_cc_amp:
 
             for i in range(1,self.nom_nneg):
                 # compute Green's function only at those frequencies where the source spectrum is non-zero
-                # self.thresh_pow = (0.01*np.amax(self.pss))/100
-                # if self.pss[i] < self.thresh_pow:
                 if not (self.fhz[i] in self.fpos_pow):
                     # print("(ignoring FREQUENCY %f Hz)" %(self.fhz[i]))
                     pass
@@ -673,37 +556,22 @@ class inv_cc_amp:
 
                     # ------ using external modules if required ------
 
-                    if (lat_homo_tru and modelling_tru==mlg2) or (lat_homo_inv and modelling_inv==mlg2):
-                        hs2do = hs2d.single_freq(x3*1e3,y3*1e3,dx*1e3,dx*1e3,self.fhz[i],self.c,[0],[0])
-                        num_sol_acou = hs2do.u2_2D
-                    elif (lat_homo_tru and modelling_tru==mlg3) or (lat_homo_inv and modelling_inv==mlg3):
-                        idx=np.searchsorted(dhaso_freqs, self.fhz[i])
-                        assert idx==i
-                        nbl = dhaso.vel_model.nbl
-                        num_sol_acou = np.conj(dhaso.GF_FD[idx,nbl:-nbl,nbl:-nbl])
-                        amp_fac = gs_xy[0]*gs_xy[1]
-                        num_sol_acou /= amp_fac
-                        # amplitude correction
-                    else:
-                        num_sol_acou = None
-
                     if modelling_tru==mlg1 or modelling_inv==mlg1:
                         try:
-                            assert elastic, "Elastic modelling chosen in config file but corresponding input not provided"
+                            assert elastic, "Elastic modelling chosen in Par file but corresponding input not provided"
                         except AssertionError:
                             raise SystemExit("Please supply input for (1-D) elastic modelling or choose scalar modelling")
                         period = 1./self.fhz[i] # seconds
                         swgmfo = gf3.Green_SW_monofreq(period, Zpts_all, discon_mod, nzmax)
                         try:
                             swgmfo.prepare_egn(efile_ray, dfile_ray, 'ray')
-                            # if love:
-                            #     swgmfo.prepare_egn(efile_lov, dfile_lov, 'lov')
+                            if love:
+                                swgmfo.prepare_egn(efile_lov, dfile_lov, 'lov')
                         except Exception as e:
                             print(e)
                             raise SystemExit("Aborted: cannot compute Green's functions.")
                         else:
-                            # swgmfo.G_cartesian_grid(self.gx3, self.gy3, r, 2)
-                            swgmfo.G_cartesian_grid(dg.gx3, dg.gy3, r, 2)
+                            swgmfo.G_near_field(dg.gx3, dg.gy3, r, 2)
                             semian_sol_elas = swgmfo.Gtensor
                     else:
                         try:
@@ -717,7 +585,7 @@ class inv_cc_amp:
 
                     solution = {'anal_scal_0D': ssp.hankel1(0,self.omega[i]*r/self.c) * 1j * 0.25,
                                 'anal_elas_1D': semian_sol_elas,
-                                'num_scal_2D_FD': num_sol_acou,
+                                # 'num_scal_2D_FD': num_sol_acou,
                                 'num_scal_2D_TD': None}
 
                     if elastic:
@@ -739,13 +607,6 @@ class inv_cc_amp:
 
         if not (lat_homo_tru and lat_homo_inv):
             """ Laterally HETEROGENEOUS structure model(s) """
-
-            try:
-                assert ('num' in modelling_tru) or ('num' in modelling_inv)
-                # modelling type has to be numerical
-            except AssertionError:
-                raise SystemExit("Laterally heterogeneous structure incompatible with analytical modelling.\
-                Please check modelling settings in config file.")
 
             gs_xy = [dx*1e3, dx*1e3]                            # MUST be in metres
             dom_orig = np.asarray([dg.X[0], dg.Y[0]])           # MUST be in kilometres
@@ -779,7 +640,6 @@ class inv_cc_amp:
             self.rec_locs_dvto[:, 1] = self.rlocsy*1e3
 
             self.numsol_pt_src = np.zeros((self.nrecs, self.nom_nneg, ngpmb, ngpmb), dtype='complex')
-            # self.numsol_pt_src = np.zeros((self.nrecs, self.nom, ngpmb, ngpmb), dtype='complex')
             if not config.ext_data:
                 if omost_fac==2:
                     self.numsol_obs_pt_src = np.zeros((self.nrecs, self.nom_nneg, ngpmb, ngpmb), dtype='complex')
@@ -797,7 +657,6 @@ class inv_cc_amp:
                         self.dhaso.resample()
                         self.numsol_pt_src[k,...] = self.dhaso.get_FD()[slice(tillf),...]
                         # RHS uses 'rfft', so it may have one extra term in frequency (positive Nyquist term) compared to the LHS - this extra term must be excluded
-                        # self.numsol_pt_src[k,...] = self.dhaso.get_FD()
                     except Exception as e:
                         print(e)
                         raise SystemExit("Problem with devito solution (syn), program aborted.")
@@ -808,7 +667,6 @@ class inv_cc_amp:
                         dhaso_obs.resample()
                         self.numsol_obs_pt_src[k,...] = dhaso_obs.get_FD()[slice(tillf),...]
                         # RHS uses 'rfft', so it may have one extra term in frequency (positive Nyquist term) compared to the LHS - this extra term must be excluded
-                        # self.numsol_pt_src[k,...] = self.dhaso.get_FD()
                     except Exception as e:
                         print(e)
                         raise SystemExit("Problem with devito solution (obs), program aborted.")
@@ -873,8 +731,6 @@ class inv_cc_amp:
                                     Gsyn_k = np.transpose(Grec_k,[2,0,1])
 
                                     self.syncross_tensor[p,q,:,j,k] = u1.compute_cc_1pair_ptsrc(Gsyn_j, Gsyn_k, self.signal, self.distribs_inv, self.pss)
-                                    # print("CHECK pss")
-                                    # print(np.sum(self.pss))
 
                                 elif struc_type=='lhet':
                                     self.syncross_tensor[p,q,:,j,k] = u1.compute_cc_1pair_ptsrc(solsyn_j, solsyn_k, self.signal, self.distribs_inv)
@@ -921,7 +777,7 @@ class inv_cc_amp:
             need_to_scale=True
             freq_max = np.amax(self.fpos_pow)
 
-            evdo = u1.egy_vs_dist(self.reald, self.dist_rp_sorted, self.c/freq_max)
+            evdo = u2.egy_vs_dist(self.reald, self.dist_rp_sorted, self.c/freq_max)
             self.egy_obs, self.oef = evdo.fit_curve_1byr(self.nom, self.obscross_aspec, 'FD', self.dist_rp_grid, self.npfwdm, evdo.sig_dummy)
             # oef -> observed_energy_fitted
 
@@ -978,11 +834,6 @@ class inv_cc_amp:
         elif dat_type=='obs':
             self.obsenv=np.abs(ss.hilbert(self.obscross, axis=0))
 
-        # if self.iter==0:
-        # 	self.obscross_aspec = np.abs(np.fft.fft(self.obscross,axis=0))
-        	# for the synthetic data case, this MAY BE generated here for the FIRST time; for the real data case
-        	# this is a recalculation but now the upper triangular part of the matrix is also filled in.
-
     #######################################################################################################################
 
     # def compute_cc_distsources(self, dat_type):
@@ -1029,7 +880,7 @@ class inv_cc_amp:
 
     #######################################################################################################################
 
-    def make_measurement(self):
+    def make_measurement(self, iter_num):
 
         print("In function make_measurement...")
 
@@ -1037,10 +888,9 @@ class inv_cc_amp:
         self.weightneg = np.zeros((self.nom, self.nrecs, self.nrecs))
         self.synamp_pos = np.zeros((self.nrecs, self.nrecs))
         self.synamp_neg = np.zeros((self.nrecs, self.nrecs))
-        self.obsamp_pos = np.zeros((self.nrecs, self.nrecs))
-        self.obsamp_neg = np.zeros((self.nrecs, self.nrecs))
-
-        # initscal = np.zeros((self.nrecs, self.nrecs))
+        if iter_num==0:
+            self.obsamp_pos = np.zeros((self.nrecs, self.nrecs))
+            self.obsamp_neg = np.zeros((self.nrecs, self.nrecs))
 
         self.negl = np.zeros((self.nrecs, self.nrecs), dtype='int')
         self.negr = np.zeros((self.nrecs, self.nrecs), dtype='int')
@@ -1065,9 +915,6 @@ class inv_cc_amp:
                 # REAL/EXTERNAL DATA CASE
                 	lef = max(0,self.dist_rp_grid[j,k]/self.c + lefw) # left boundary of window (seconds)
                 	rig = self.dist_rp_grid[j,k]/self.c + rigw # right boundary of window (seconds)
-
-                	#lef = self.dist_rp_grid[j,k]/cfast # left boundary of window (seconds)
-                	#rig = self.dist_rp_grid[j,k]/cslow # right boundary of window (seconds)
 
                 	self.negl[j,k] = np.searchsorted(self.t,-rig)
                 	self.negr[j,k] = np.searchsorted(self.t,-lef)
@@ -1098,12 +945,7 @@ class inv_cc_amp:
                     raise SystemExit("Aborted. The chosen window for computing cross-corrrelation energy \
                     	 lies outside the modelled time range")
 
-                # print("Negative side window indices: ", self.negl[j,k], self.negr[j,k])
-                # print("Positive side window indices: ", self.posl[j,k], self.posr[j,k])
-
                 # now make the measurements
-
-                # print("making measurement for receivers ", j,k)
 
                 self.weightpos[self.posl[j,k]:self.posr[j,k], j, k] = self.syncross[self.posl[j,k]:self.posr[j,k], j, k]
                 self.weightneg[self.negl[j,k]:self.negr[j,k], j, k] = self.syncross[self.negl[j,k]:self.negr[j,k], j, k]
@@ -1113,8 +955,9 @@ class inv_cc_amp:
                 self.synamp_neg[j,k] = np.sqrt(np.sum(self.weightneg[:,j,k]**2))
                 #  computing eq. 24 (numerator only), negative branch
 
-                self.obsamp_pos[j,k] = np.sqrt(np.sum(self.obscross[self.posl[j,k]:self.posr[j,k],j,k]**2))#*self.deltat)
-                self.obsamp_neg[j,k] = np.sqrt(np.sum(self.obscross[self.negl[j,k]:self.negr[j,k],j,k]**2))#*self.deltat)
+                if iter_num==0:
+                    self.obsamp_pos[j,k] = np.sqrt(np.sum(self.obscross[self.posl[j,k]:self.posr[j,k],j,k]**2))#*self.deltat)
+                    self.obsamp_neg[j,k] = np.sqrt(np.sum(self.obscross[self.negl[j,k]:self.negr[j,k],j,k]**2))#*self.deltat)
 
                 with np.errstate(invalid='raise'):
                     try:
@@ -1144,6 +987,76 @@ class inv_cc_amp:
             except AssertionError:
                 print(count_zvlt)
                 raise SystemExit("Problem with non-diagonal elements of measurement matrices")
+            
+    #######################################################################################################################
+
+    def compute_misfit(self, iter_num):
+
+        with np.errstate(invalid='ignore'):
+            # "invalid value encountered in true_divide" is bound to happen (division by 0)
+            # because the diagonal elements of both obsamp and synamp, are 0.
+            # As for non-diagonal elements, we have already done the necessary checks in "make_measurements",
+            # therefore here, we can safely ignore the division by 0.
+            deltad_pos_mat = np.log(self.obsamp_pos/self.synamp_pos)
+            deltad_neg_mat = np.log(self.obsamp_neg/self.synamp_neg)
+
+        # from matrix-form (2D) to vector-form (1D)
+        lta = config.mat_to_vec(self.data_availability)
+        # lower_triangular_available(elements)
+        dd_pos_vec = config.mat_to_vec(deltad_pos_mat)
+        dd_neg_vec = config.mat_to_vec(deltad_neg_mat)
+
+        self.deltad_pos = dd_pos_vec[np.nonzero(lta)]
+        self.deltad_neg = dd_neg_vec[np.nonzero(lta)]
+
+        assert self.deltad_pos.size == self.npairs_use
+
+        self.dvar_pos = np.ones(self.npairs_use)
+        self.dvar_neg = np.ones(self.npairs_use)
+
+        if iter_num==0 and self.reald:
+            # complete the calculation of the data errors. NB: we consider two types of error.
+            # The first one (energy decay) is independent of the measurements and is already computed.
+            # The second (SNR) is defined relative to the measurements, so we must compute the absolute values here.
+
+                dvar_snr_pos = np.square(self.esnr * self.obsamp_pos)
+                dvar_snr_neg = np.square(np.transpose(self.esnr) * self.obsamp_neg)
+
+                # combine different errors
+                dvar_pos = dvar_snr_pos #+ self.dvar_egy_ltpb
+                dvar_neg = dvar_snr_neg #+ np.transpose(self.dvar_egy_ltpb)
+
+                zvar_p=np.argwhere(dvar_pos==0)
+                zvar_n=np.argwhere(dvar_neg==0)
+                if not (np.all(zvar_p[:,0]<=zvar_p[:,1]) and np.all(zvar_n[:,0]<=zvar_n[:,1])):
+                # this means there are 0-values in the lower-triangular part of 'dvar_pos/neg' - should be due to missing data only.
+                    ltzv_p=zvar_p[zvar_p[:,0]>zvar_p[:,1]]
+                    ltzv_n=zvar_n[zvar_n[:,0]>zvar_n[:,1]]
+                    if (ltzv_p.shape[0] != self.npfwdm) or (ltzv_n.shape[0] != self.npfwdm):
+                        print(ltzv_p.shape)
+                        print(ltzv_n.shape)
+                        raise SystemExit("Problem with observed data errors - unexpected zero values.")
+                    
+                # convert data variance from matrix-form (2D) to vector-form (1D)
+                dvar_pos_vec = config.mat_to_vec(dvar_pos)
+                dvar_neg_vec = config.mat_to_vec(dvar_neg)
+                self.dvar_pos = dvar_pos_vec[np.nonzero(lta)]
+                self.dvar_neg = dvar_neg_vec[np.nonzero(lta)]
+                assert self.dvar_pos.size == self.npairs_use
+        
+        with np.errstate(invalid='raise', divide='raise'):
+            try:
+                wmp = self.deltad_pos / np.sqrt(self.dvar_pos)
+                wmn = self.deltad_neg / np.sqrt(self.dvar_neg)
+            except (ZeroDivisionError, FloatingPointError) as e:
+                # this should never happen; the data variance vector should not contain any zero-variances,
+                # because this has been taken care of when creating the vector.
+                print(e)
+                print(self.dvar_pos)
+                print(self.dvar_neg)
+                raise SystemExit("Problem with data errors vector - contains zero values.")
+
+        return 0.5*(np.dot(wmp,wmp) + np.dot(wmn,wmn))
 
     #######################################################################################################################
 
@@ -1195,7 +1108,7 @@ class inv_cc_amp:
         norm_kernneg = np.sum(kernneg*self.distribs_inv) * dx**2
         # kernel normalization, eq. 29
 
-        if norm_kernpos < 0.85 or norm_kernneg < 0.85 or norm_kernpos > 1.15 or norm_kernneg > 1.15:
+        if norm_kernpos < 0.95 or norm_kernneg < 0.95 or norm_kernpos > 1.05 or norm_kernneg > 1.05:
             if norm_kernpos==0 and norm_kernneg==0:
             # happens in case of missing data
                 pass
@@ -1300,7 +1213,7 @@ if __name__ == '__main__':
 
     kcao = inv_cc_amp(rlocx, rlocy, sig_att, True, True, None, None)
 
-    u2.post_run(0, sig_att, 0, oica=kcao)
+    uio.post_run(0, sig_att, 0, oica=kcao)
 
     #********************************************* Make plots ***************************************************
 
