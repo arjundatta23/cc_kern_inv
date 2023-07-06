@@ -21,11 +21,11 @@ if not scalar:
 
 ################################################################################
 
+nrecs = config.nrecs
 dx = config.dom_geom.dx
 ngpmb = config.dom_geom.ngp_box
 nband = config.syn_data.noise_band
 
-# sig_char = config.sig_char
 # IMPORTANT: sig_char NOT to be taken from config file because it is overwritten
 # in the code wrapper when working with external data!!
 
@@ -57,8 +57,17 @@ class check_settings:
 			assert self.dist_max < config.dom_geom.box_len
 		except AssertionError:
 		    raise Exception("Receivers must lie WITHIN computational domain; please check configuration file.")
+		
+		# Check consistency of forward modelling choices
+		try:
+			assert int(config.tru_struc_lat_homo) != config.mtl1_tru
+			assert int(config.inv_struc_lat_homo) != config.mtl1_inv
+		except AssertionError:
+			raise Exception("Laterally heterogeneous structure incompatible with analytical modelling.\
+				Laterally homogeneous structure (setting) must not be combined with numerical modelling.\
+                Please check modelling settings in Par file.")
 
-		self.fmax = np.amax(self.sig_char.fhz_pow_pos)
+		self.fmax = config.sig_thresh_dB(fhz_pos, pss_pos, -30)[-1]
 
 		if scalar:
 			self.phasespeed_min = config.scal_mod.wavspeed_scal2D
@@ -185,7 +194,7 @@ class memory_reqt:
 
 	#***************************************************************************
 
-	def source_kern(self, nrecs):
+	def source_kern(self):
 
 		for_mod = 2 * 8 * (ngpmb**2) * 1e-9
 		# one for starting model, one for model update

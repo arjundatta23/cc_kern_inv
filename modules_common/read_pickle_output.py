@@ -1,8 +1,6 @@
 #!/usr/bin/python
 
 # General purpose modules
-import os
-import sys
 import gzip
 import pickle
 import numpy as np

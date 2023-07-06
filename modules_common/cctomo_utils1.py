@@ -1,49 +1,28 @@
 import sys
 import numpy as np
 import scipy.signal as ss
-# import scipy.stats as sst
-import scipy.optimize as sop
+import matplotlib.pyplot as plt
 
 
-if not __name__ == '__main__':
-# get essential variables from main (calling) program
-    # print("From u1:")
-    # print(sys.modules['__main__'])
-    try:
-        dom_geom = sys.modules['__main__'].dg
-    except AttributeError:
-        dom_geom = sys.modules['__main__'].cg_dom_geom
+import config_file as config
 
-# global variables
+#------------------------------------------ global variables -------------------------------------------------
+nrecs_select = config.nrecs
+reald = config.ext_data
+dom_geom = config.dom_geom
+try:
+    # overwrite some of these data types if relevant
+    dom_geom = sys.modules['__main__'].dom_geom_pckl
+except AttributeError:
+    pass
+
 dxy = dom_geom.dx
-ngp_mb = dom_geom.ngp_box
-ngp = {2: ngp_mb, 3: 2*ngp_mb-1}
+ngpmb = dom_geom.ngp_box
+gamma = config.invc.gamma_inv
+
+ngp = {2: ngpmb, 3: 2*ngpmb-1}
 xall = {2: dom_geom.X, 3: dom_geom.X2}
 yall = {2: dom_geom.Y, 3: dom_geom.Y2}
-
-###############################################################################################################
-def read_station_file(st_file):
-
-    """ Format of input file MUST be:
-    	COLUMNS(4): <Sl no.> <ID> <Easting(x)> <Northing(y)>
-    	ROWS(n + 1): one header line followed by n lines; n is no. of stations/receivers
-    """
-
-    cfh=open(st_file,'r')
-
-    cfh.readline()
-    entire=cfh.readlines()
-    try:
-        st_no=list(map(lambda p: int(p.split()[0]), entire))
-        st_id=list(map(lambda p: p.split()[1], entire))
-        xr=np.array([float(p.split()[2])/1e3 for p in entire])
-        yr=np.array([float(p.split()[3])/1e3 for p in entire])
-    except IndexError:
-        raise SystemExit("Problem reading %s. Check file format." %(st_file))
-
-    cfh.close()
-    del cfh
-    return st_no, st_id, xr, yr
 
 ###############################################################################################################
 def compute_cc_1pair_ptsrc(uA, uB, sig_par, src_distrib, powspec=None):
@@ -82,6 +61,210 @@ def compute_cc_1pair_ptsrc(uA, uB, sig_par, src_distrib, powspec=None):
     return ans
 
 ###############################################################################################################
+
+class setup_modelling_domain:
+
+	def __init__(self, st_no, st_id, xrec, yrec, ox, oy, make_plots=True):
+
+		self.dxy=dxy
+
+		assert xrec.size==yrec.size
+		nrecs_total = xrec.size
+
+		#************** redefine receiver locations for chosen grid and coordinate origin ************
+		recx_ro = xrec - ox
+		recy_ro = yrec - oy
+		# ro -> relative_to_origin
+		recx_gp = recx_ro/dxy
+		recy_gp = recy_ro/dxy
+		# receiver locations in integer grid points away from coordinate origin
+		recx_igp = np.asarray(np.rint(recx_gp), dtype=int)
+		recy_igp = np.asarray(np.rint(recy_gp), dtype=int)
+
+		if nrecs_select < nrecs_total:
+			# sta_subset_file = input("File containing receiver subset (enter 0 for automatic selection): ")
+			sta_subset_file = "0"
+			if sta_subset_file.isdigit():
+				#************** Automated selection criterion for selecting a subset of entire array *************
+				ro_act = np.sqrt(recx_ro**2 + recy_ro**2)
+				ro_grid = np.sqrt((recx_igp*dxy)**2 + (recy_igp*dxy)**2)
+				grd_err = np.abs(ro_act-ro_grid)
+				grd_err_chosen = np.sort(grd_err)[:nrecs_select]
+				ichosen = np.argwhere(np.in1d(grd_err,grd_err_chosen))
+			else:
+				ssf=open(sta_subset_file,'r')
+				entire=ssf.readlines()
+				ssf.close()
+				del ssf
+				sel_st_id=list(map(lambda p: p.split()[0], entire))
+				try:
+					ichosen=np.array([st_id.index(j) for j in sel_st_id])
+				except ValueError:
+					print(sel_st_id)
+					raise SystemExit("Problem with station selection file - listed stations not present in master list.")
+
+		elif nrecs_select == nrecs_total:
+			ichosen = np.arange(nrecs_total)
+
+		self.act_recx_rel=recx_ro[ichosen]
+		self.act_recy_rel=recy_ro[ichosen]
+
+		try:
+			assert len(ichosen)==nrecs_select
+		except AssertionError:
+			print(len(ichosen))
+			raise SystemExit("Problem with number of receivers selected.")
+
+		self.rchosenx_igp = recx_igp[ichosen.flatten()]
+		self.rchoseny_igp = recy_igp[ichosen.flatten()]
+		chosen_st_id = [st_id[s] for s in ichosen.flatten()]
+		chosen_st_no = [st_no[s] for s in ichosen.flatten()]
+		rnchosen = [j+1 for j in ichosen.flatten()]
+		try:
+			assert rnchosen==chosen_st_no
+		except AssertionError:
+			print(rnchosen)
+			print(chosen_st_no)
+			raise SystemExit("Problem with station/receiver numbers")
+
+		print("\nChosen %d out of %d receivers: " %(len(ichosen),nrecs_total))
+		print(chosen_st_no)
+		print(chosen_st_id)
+
+		self.chosen_st_no = chosen_st_no
+		self.chosen_st_id = chosen_st_id
+
+		#***************************** compute pairwise distances ************************************
+		self.act_dist_rp=np.zeros((nrecs_select,nrecs_select))
+		# self.act_dist_rp -> actual_distance_receiver_pairs. The word "actual" is used in the name so as to distinguish
+		# these distances from the "effective" ones which are computed, in the h13 module, using the approximate
+		# reciever locations on the uniform grid of h13.
+		act_rnum_rp=np.zeros((nrecs_select,nrecs_select), dtype=object)
+		# act_rnum_rp -> similar to self.act_dist_rp but for receiver-pair numbers/names, rather than distances
+
+		for b,brec in enumerate(rnchosen[:-1]):
+			urecs=rnchosen[b+1:]
+			x1=xrec[np.searchsorted(st_no,brec)]
+			y1=yrec[np.searchsorted(st_no,brec)]
+			x2=xrec[np.searchsorted(st_no,urecs)]
+			y2=yrec[np.searchsorted(st_no,urecs)]
+			self.act_dist_rp[b+1:,b]=np.sqrt( (x2-x1)**2 + (y2-y1)**2 )
+			self.act_dist_rp[b,b+1:]=self.act_dist_rp[b+1:,b]
+			act_rnum_rp[b:,b]=list(map(lambda x: '%d-%d' %(x,brec), rnchosen[b:]))
+			act_rnum_rp[b,b:]=list(map(lambda x: '%d-%d' %(brec,x), rnchosen[b:]))
+
+		self.dist_1Darr = self.act_dist_rp[np.nonzero(np.tril(self.act_dist_rp))]
+		try:
+			assert self.dist_1Darr.size == int(nrecs_select*(nrecs_select-1)/2)
+		except AssertionError:
+			raise SystemExit("Problem with matrix of receiver pair distances: found at least one zero-value for interstation distance")
+
+		# print(self.act_dist_rp)
+		# print("Receiver-pair distances: ")
+		# print(self.dist_1Darr)
+
+		#********************************** make plots if desired ************************************
+		if make_plots:
+			self.plot_absolute_actual(xrec,yrec,ichosen)
+			self.plot_relative_gridded()
+			self.plot_raypaths(xrec-ox,yrec-oy,ichosen)
+
+		#*********************************************************************************************
+
+	def plot_absolute_actual(self,rx,ry,ind_in):
+		ind_all = np.arange(rx.size)
+		ind_out = np.setdiff1d(ind_all,ind_in)
+		xry_act=plt.figure()
+		axmap=xry_act.add_subplot(111,aspect='equal')
+		# selected stations
+		axmap.scatter(rx[ind_in],ry[ind_in],marker='^',s=100,facecolor='r',edgecolor='k')
+		# excluded stations
+		axmap.scatter(rx[ind_out],ry[ind_out],marker='^',s=100,facecolor='r',alpha=0.1,edgecolor='k')
+		# interstation paths for all RELEVANT station pairs
+		for j in ind_in:
+			for k in ind_in:
+				if k>j:
+					axmap.plot([rx[j],rx[k]],[ry[j],ry[k]],color='grey')
+		axmap.set_xlabel("Easting [km]")
+		axmap.set_ylabel("Northing [km]")
+		axmap.set_title("Absolute coordinates")
+
+	def plot_relative_gridded(self):
+		xpos_grid=self.rchosenx_igp*self.dxy
+		ypos_grid=self.rchoseny_igp*self.dxy
+		fig=plt.figure()
+		axgrid=fig.add_subplot(111, aspect='equal')
+		axgrid.scatter(self.act_recx_rel,self.act_recy_rel,marker='^',facecolor='b',label="Actual")
+		axgrid.scatter(xpos_grid,ypos_grid,marker='o',facecolor='r',label="On uniform grid")
+		axgrid.set_xlabel('Km')
+		axgrid.set_ylabel('Km')
+		axgrid.set_title("Relative coordinates")
+		axgrid.legend()
+
+	def plot_raypaths(self,all_rx_rel,all_ry_rel,ind_sel):
+		ind_all = np.arange(all_rx_rel.size)
+		ind_out = np.setdiff1d(ind_all,ind_sel)
+
+		nrecs_sel = self.rchosenx_igp.size
+
+		xpos_grid=self.rchosenx_igp*self.dxy
+		ypos_grid=self.rchoseny_igp*self.dxy
+		fig=plt.figure()
+		axrp=fig.add_subplot(111, aspect='equal')
+		axrp.scatter(xpos_grid,ypos_grid,marker='^',s=100,facecolor='r',edgecolor='k')
+		axrp.scatter(all_rx_rel[ind_out],all_ry_rel[ind_out],marker='^',s=100,facecolor='r',alpha=0.1,edgecolor='k')
+
+		pair_counter=0
+		for j in range(nrecs_sel-1):
+			for k in range(j+1,nrecs_sel):
+				# print("Selected pair: ",j,k)
+				x1=xpos_grid[j]
+				x2=xpos_grid[k]
+				y1=ypos_grid[j]
+				y2=ypos_grid[k]
+				axrp.plot([x1,x2],[y1,y2],color='grey')
+				pair_counter+=1
+		assert pair_counter == nrecs_sel*(nrecs_sel-1)/2
+
+		axrp.set_xlabel('X [km]', fontsize=14)
+		axrp.set_ylabel('Y [km]', fontsize=14)
+		axrp.tick_params(axis='both', labelsize=14)
+		# axrp.set_title("Relative coordinates")
+
+########################################################################################################################################
+
+class use_modelling_domain:
+
+	def __init__(self, rlocsx, rlocsy):
+
+		nrecs = rlocsx.size
+
+		self.dist_rp=np.zeros((nrecs,nrecs))
+		for j in range(nrecs):
+		    for i in range(nrecs):
+		        self.dist_rp[i,j] = np.sqrt( (rlocsx[i]-rlocsx[j])**2 + (rlocsy[i]-rlocsy[j])**2 )
+
+		# check matrix of distances computed after gridding
+		izd=np.argwhere(self.dist_rp==0)
+		try:
+		    assert np.all(izd[:,0]==izd[:,1])
+		    # only diagonal elements of the distance matrix should be 0
+		except AssertionError:
+		    print(izd[izd[:,0] != izd[:,1]])
+		    raise SystemExit("One or more pair of stations (code ids printed above), has the same location on grid -\
+		     please rectify by either changing the grid, or eliminating one of the stations in each pair.")
+
+		dist_all = self.dist_rp[np.nonzero(np.tril(self.dist_rp))]
+		self.alldist_1D = dist_all[np.argsort(dist_all)]
+		# a sorted 1-D array of receiver-pair distances
+
+		print("Receiver pair indices sorted by distance: ")
+		# for sd in self.alldist_1D:
+		# 	rpi=np.argwhere(self.dist_rp==sd)
+		# 	rpi_lt = rpi[rpi[:,0]>rpi[:,1]][0]
+		# 	print(rpi_lt, "%s-%s" %(chosen_st_id[rpi_lt[0]], chosen_st_id[rpi_lt[1]]))
+
+########################################################################################################################################
 
 class add_noise_all_cc:
 
@@ -127,9 +310,6 @@ class somod:
         ampl = specs['mag'][ind]
         sigma_x = specs['w'][ind][0]/4
         sigma_y = specs['w'][ind][1]/4
-
-        # print("From mult_gauss: ", xp)
-        # print("From mult_gauss: ", yp)
 
         for j in range(ngp[fac_rel]):
             ans[:,j] = np.exp( -( (xall[fac_rel][j] - xp)**2/(sigma_x**2) + (yall[fac_rel] - yp)**2/(sigma_y**2) ) )
@@ -185,11 +365,8 @@ class somod:
     def gcover(coord, specs, fac_rel=2):
         ans=np.zeros((ngp[fac_rel],ngp[fac_rel]))
         sigma = specs['w']/4
-        # xv,yv=np.meshgrid(row_val,row_val)
-        x0=coord[0] # xv.flatten()
-        y0= coord[1] #.flatten()
-        # print('x-pos',x0)
-        # print('y-pos',y0)
+        x0=coord[0] 
+        y0= coord[1]
         for j in range(ngp[fac_rel]):
             ans[:,j] = np.exp(-((xall[fac_rel][j] - x0)**2 + (yall[fac_rel] - y0)**2)/(sigma**2) )
         return ans
@@ -198,249 +375,108 @@ class somod:
 
 ###############################################################################################################
 
-class egy_vs_dist:
+class inversion:
 
-    def __init__(self, reald, dist1D, lam_shortest):
+	def __init__(self, nm):
 
-        self.dist1D_sorted = dist1D
+	    #---------------------------- fix the damping (model covarance matrix) ------------------------------
+	    if reald:
+		# in case of real data, we use a banded model covariance matrix (non-zero covariances)
+	    	self.Cm = np.zeros((nm,nm))
+	    	cord = 3
+	    	# cord -> correlation_distance
+	    	for r in range(self.Cm.shape[0]):
+	    		col = np.arange(float(self.Cm.shape[1]))
+	    		self.Cm[r,:] = ((1./gamma)**2)*np.exp(-0.5*(((r-col)/cord)**2))
+	    	self.CmInv = np.linalg.inv(self.Cm)
 
-        if reald:
-        # in the real data case, treat 'very short' distances with caution
-            nf_dist = 0.5 * lam_shortest
-            # nf_dist -> near_field_distance. Using a very crude estimate: half the shortest wavelength in the data
-            sd_ind=np.argwhere(self.dist1D_sorted<nf_dist)
-            # sd_ind -> short_distance_indices
-            self.sig_dummy = np.ones(self.dist1D_sorted.size)
-            self.sig_dummy[sd_ind] = 5
-            # NB: self.sig_dummy - deliberately called "dummy" - contains basically the relative weights for the data points, NOT
-            # the actual standard deviations. This is reflected in the argument "absolute_sigma=False" to scipy's curve fit.
-        else:
-            self.sig_dummy = None
+	    else:
+		# in case of synthetic data, we can get away with a diagonal model covariance matrix (covariances = 0)
+	    	Dmat=np.identity(nm)
+	    	self.CmInv = (gamma**2)*Dmat
 
-    #---------------------------------------------------------------------------
+    	# to view the model covariance matrix (with iPython), use:
+    	# x=np.arange(kcao.Cm.shape[0]); y=np.arange(kcao.Cm.shape[1])
+    	# gx,gy=np.meshgrid(x,y)
+    	# plt.pcolor(gx,gy,kcao.Cm)
 
-    # def fit_curve_1byr(self, nom, cc, domain, dist2D, nmissing, dummy_sig, zvinfo=None):
-    def fit_curve_1byr(self, nom, cc, domain, dist2D, nmissing, dummy_sig):
+        #----------------------------------------- End of damping --------------------------------------------
 
-        #***** define local functions
-        domain_dic = {'FD': lambda x: x, 'TD': lambda x: np.abs(np.fft.fft(x,axis=0))}
-        one_by_r = lambda x,k: k/x
+	def invert(self, nm, basis, m_prior, m_iter, mfk_pos, mfk_neg, Gmat_pos, Gmat_neg, deltad_pos, deltad_neg, dvar_pos, dvar_neg, COMPLETE=True):
 
-        #***** calculate cross-correlation energies
-        cc_aspec = domain_dic[domain](cc)
-        da = dist2D[np.nonzero(np.tril(dist2D))]
-        ccegy_funcf = np.square(cc_aspec) # ccegy_funcf -> cc_power_as_a_function_of_frequency
-        cc_egy = np.sum(ccegy_funcf,axis=0)/nom
-        self.egy_flat = cc_egy[np.nonzero(np.tril(dist2D))] # the matrix is symmetric so it suffices to consider only its lower triangular part
+		#----------------------------------------- CORE OPTIMIZATION ROUTINES --------------------------------------------
 
-        # print(self.egy_flat)
-        # print(self.egy_flat.size)
+		def GAUSS_NEWTON():
 
-        # #***** ASSIGN zero values (relevant for synthetics, in case of missing data)
-        # if not zvinfo is None:
-        #     self.egy_flat[zvinfo]=0
-        #
-        # #***** STORE zero-value indices (for possible later use), in case of missing data
-        # self.zvi = np.argwhere(self.egy_flat==0) if nmissing>0 else None
+			# compute basic (unweighted, undamped) gradient
+			if np.sum(basis)!=0:
+				# METHOD 1 for basic gradient
+				kb_prod2 = mfk[br] * basis * 2*m_iter[:,None,None]
+				ng1[br][:] = np.sum(kb_prod2, axis=(1,2)) * dxy**2
+			else:
+				ng1[br] = mfk[br].flatten()
+			# METHOD 2 for basic gradient
+			ng2[br] = np.matmul(G[br].T,dd[br])
+			try:
+				assert np.allclose(ng1[br],ng2[br],rtol=1e-03)
+			except AssertionError:
+				print("Gradient computed by approch 1: ", ng1[br])
+				print("Gradient computed by approch 2: ", ng2[br])
+				print(dd[br])
+				raise SystemExit("Quitting. Problem computing gradient.")
 
-        #***** CHECK zero values (due to missing data)
-        n_total = self.egy_flat.size
-        n_finite_egy = np.nonzero(self.egy_flat)[0].size
-        assert n_total==self.dist1D_sorted.size
-        try:
-            assert (n_total - n_finite_egy) == nmissing
-        except AssertionError:
-            print(n_total, n_finite_egy, nmissing)
-            raise SystemExit("Problem with cross-correlation energies - unexpected number of zero values.")
+			# effect of weighting
+			Gt_CdInv = (G[br].T)*dvi[br]
+			ngrad = np.matmul(Gt_CdInv,dd[br])
 
-        #***** eliminate zero values
-        egy_sorted = self.egy_flat[np.argsort(da)]
-        use_energies = egy_sorted[np.nonzero(egy_sorted)]
-        use_dist = self.dist1D_sorted[np.nonzero(egy_sorted)]
-        if not dummy_sig is None:
-            use_sigma = dummy_sig[np.nonzero(egy_sorted)]
+			# effect of damping
+			ngrad_use = ngrad - np.matmul(self.CmInv,(m_iter - m_prior))
 
-        #***** do curve fitting (with zero values excluded)
-        try:
-            popt, pcov = sop.curve_fit(one_by_r, use_dist, use_energies, sigma=use_sigma, absolute_sigma=False)
-        except NameError:
-            # 'sigma' value not used in case of synthetic data
-            # print(use_dist)
-            # print(use_dist.size)
-            # print(use_energies)
-            popt, pcov = sop.curve_fit(one_by_r, use_dist, use_energies)
+			if COMPLETE:
+				# Hessian with weighting and damping
+				hess_apx = np.matmul(Gt_CdInv,G[br])
+				self.hess_use = hess_apx + self.CmInv
 
-        ef = popt[0]/use_dist
+				#********** solve the linear system for the model update
+				deltam[b,:] = np.linalg.solve(self.hess_use,ngrad_use)
+			else:
+				#********** simply save desired quantities
+				grad_undamped[b,:] = -1 * ngrad
 
-        #***** initialize arrays containing final output - use 'nan' to allow for missing data
-        self.ef = np.nan*np.ones(n_total)
-        self.use_energies = np.nan*np.ones(n_total)
+		#----------------------------------------- CORE INVERSION ROUTINES --------------------------------------------
 
-        #***** create final output (with zeros replaced by nans)
-        self.ef[np.nonzero(egy_sorted)] = ef
-        self.use_energies[np.nonzero(egy_sorted)] = use_energies
+		ngrad1_pos=np.empty(nm); ngrad2_pos=np.empty(nm)
+		ngrad1_neg=np.empty(nm); ngrad2_neg=np.empty(nm)
+		# there are two ways of computing the gradient of chi: with and without explicit use of
+		# the G-matrix. In other words: using individual kernels or using the total misfit kernel.
+		# We compute the gradient in both ways (hence subscripts 1, 2 on the variables) and ensure
+		# they are equal, for confidence in the calculations.
 
-        return self.use_energies, self.ef
+		# dictionaries involving variables received as input
+		mfk = {'p': mfk_pos, 'n': mfk_neg}
+		G = {'p': Gmat_pos, 'n': Gmat_neg}
+		dd = {'p': deltad_pos, 'n': deltad_neg}
+		dvi = {'p': 1./dvar_pos, 'n': 1./dvar_neg}
 
-    #---------------------------------------------------------------------------
+		# dictionaries involving variables assigned here
+		ng1 = {'p': ngrad1_pos, 'n': ngrad1_neg}
+		ng2 = {'p': ngrad2_pos, 'n': ngrad2_neg}
 
-    def indices_1D_to_2D(self, dist2D, nmissing):
+		deltam = np.zeros((2,nm))
+		if not COMPLETE:
+			grad_undamped = np.zeros((2,nm))
 
-        """ this function converts the 1-D indices obtained above (for missing data),
-        to 2-D indices relevant to the 2-D cc matrix used in the code.
-        """
+		for b,br in enumerate(G):
+		# br -> branch (positive or negative)
+		    GAUSS_NEWTON()
 
-        dummy = np.ones(dist2D.shape)
-        dummy2 = np.tril(dummy)
-        for j in range(dummy.shape[0]):
-            dummy2[j,j]=0
+		if COMPLETE:
+			# combine the results from the positive and negative branches
+			deltam_use = np.mean(deltam,axis=0)
+			m_new = m_iter + deltam_use
+			return m_new
+		else:
+			return grad_undamped
 
-        dummy2[np.nonzero(dummy2)] = self.egy_flat
-        iaz = np.argwhere(dummy2== 0)
-        final = iaz[iaz[:, 0] > iaz[:, 1]]
 
-        try:
-            assert final.shape[0]==nmissing
-        except AssertionError:
-            raise SystemExit("Problem identifying missing data using the zero-energy criterion.")
-
-        return final
-
-##########################################################################################
-
-class source_spectrum:
-
-    def __init__(self, obscross_TD):
-
-        self.obscross_aspec = np.abs(np.fft.fft(obscross_TD, axis=0))
-
-    #---------------------------------------------------------------------------
-
-    def match_obs_spectra(self, nom, freq_array, nmissing):
-
-        fhzp=freq_array[freq_array>=0]
-        fhzn=freq_array[freq_array<0]
-        # taking zero on the positive side ensures that both branches are of equal size, because remember that for
-        # even number of samples, the positive side is missing the Nyquist term.
-
-        norm_obs_aspec = np.copy(self.obscross_aspec)
-        max_each_rp = np.max(self.obscross_aspec, axis=0)
-
-        with np.errstate(invalid='raise'):
-            try:
-                norm_obs_aspec /= max_each_rp
-            except FloatingPointError as e:
-                errargs=np.argwhere(max_each_rp==0)
-                if not np.all(errargs[:,0]<=errargs[:,1]):
-                # this means there are 0-values in the lower-triangular part of 'max_each_rp' - should be due to missing data only.
-                    # print(errargs.shape)
-                    ltzv=errargs[errargs[:,0]>errargs[:,1]]
-                    if ltzv.shape[0] != nmissing:
-                        raise SystemExit("Problem with observed amplitude spectra - unexpected zero values.")
-                    else:
-                        norm_obs_aspec = np.copy(self.obscross_aspec)
-                        for eg in errargs:
-                            max_each_rp[eg[0],eg[1]] = np.nan
-                        norm_obs_aspec /= max_each_rp
-
-        obs_aspec_mean = np.nanmean(norm_obs_aspec,axis=(1,2))
-        # NB: this spectrum is useful only for its shape. It is a DUMMY as far as amplitude is concerned.
-        dummy_egy_funcf = (obs_aspec_mean)**2/(nom)
-        dummy_pow = np.sum(dummy_egy_funcf,axis=0)
-
-        # rvp=sst.skewnorm(a=-5,loc=0.55,scale=0.15)
-        # rvn=sst.skewnorm(a=5,loc=-0.55,scale=0.15)
-
-        # rvp=sst.skewnorm(a=-3,loc=0.5,scale=0.13)
-        # rvn=sst.skewnorm(a=3,loc=-0.5,scale=0.13)
-        #
-        # pss = np.concatenate((rvp.pdf(fhzp),rvn.pdf(fhzn)))
-
-        # rvp=sst.powerlognorm(c=2.0,s=0.7,loc=0.4,scale=1.0)
-        # rvn=sst.powerlognorm(c=2.0,s=0.7,loc=-4.7,scale=1.0)
-
-        # rvp=sst.powerlognorm(c=5.0,s=0.7,loc=2,scale=1.0)
-        # rvn=sst.powerlognorm(c=5.0,s=0.7,loc=-8,scale=1.0)
-        #
-        # pss = np.concatenate((rvp.pdf(fhzp),np.flip(rvn.pdf(fhzn))))
-
-        pss = obs_aspec_mean
-        pss_max = np.amax(pss)
-
-        pow_spec_dB = 10 * np.log10(pss/pss_max)
-
-        try:
-            assert pow_spec_dB[0] <= -30
-            # Negligible DC-component in spectrum
-        except AssertionError:
-            print(pss[0], pss_max)
-            # raise Exception("From u1.match_obs_spectra: Source (power) spectrum has a significant DC component")
-
-        return obs_aspec_mean, pss
-
-##########################################################################################
-
-class assign_errors:
-
-    def __init__(self, metadata):
-
-        self.secdata = metadata
-
-    #---------------------------------------------------------------------------
-
-    def snr_error(self, dist2D):
-
-        #********* Errors Part 1: error due to SNR
-        snr = self.secdata
-
-        #***** CHECK that the 'nan' entries in the matrix are symmetrical
-
-        esnrpd_ltpb = np.zeros((dist2D.shape))
-        # esnrpd -> error(due to)_SNR_(as a)_percentage_(of)_data
-        # ltpb -> lower_triangle_positive_branch
-        # (it is implied that the upper triangle of the matrix is for the negative branch)
-
-        esnrpd_ltpb[np.where(snr<2)]=0.8
-        esnrpd_ltpb[np.where((snr>2) & (snr<3))]=0.5
-        esnrpd_ltpb[np.where(snr>3)]=0.05
-
-        # esnrpd_ltpb[np.where(snr<1000)]=0.8
-        # esnrpd_ltpb[np.where((snr>1000) & (snr<5000))]=0.5
-        # esnrpd_ltpb[np.where(snr>5000)]=0.05
-
-        return esnrpd_ltpb
-
-    #---------------------------------------------------------------------------
-
-    # def decay_rate_error(self):
-    #
-    #     #********* Errors Part 2: error due to energy decay with distance
-    #
-    #     snr = self.secdata[1]
-    #     delA = self.secdata[2]
-    #
-    #     # ********************************************************************************************************************
-    #     # NB: uncertainties in the observations contained in dinfo need to be corrected, because the measurement for
-    #     # the kernels involves cc energies computed in a certain window only, whereas the curve fitting above is done using
-    #     # the energy of the entire cc branch. This correction can be made using the waveform's S/N ratio, which indirectly
-    #     # provides a measure of the contribution of the window of interest, to the total energy of the waveform (branch).
-    #     # ********************************************************************************************************************
-    #
-    #     # refine the error so it applies to the measurement window only
-    #     nsr = 1./snr
-    #     ScT = 1./(1+nsr) # 1./np.sqrt(1+nsr)
-    #     # ScT -> signal_contribution_to_total (energy)
-    #     delA *= ScT
-    #
-    #     # convert to variance
-    #     return np.square(delA)
-    #
-    # #---------------------------------------------------------------------------
-    #
-    # def grid_error(self):
-    #
-    #     # ********* Errors Part 3: position error due to relocation of receivers to grid points
-    #     origdist_rp = self.secdata[0]
-    #     deltapos = np.square(origdist_rp - self.dist_rp)
-
-##########################################################################################
+    #***************************************************************************

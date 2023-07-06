@@ -38,6 +38,7 @@ epsilon=cp.getfloat('CONSTANTS', 'epsilon')
 # BASICS (for both SOURCE/STRUCTURE inversion)
 ################################################################################
 
+nrecs=cp.getint('BASICS', 'nrecs')
 ext_data=cp.getboolean('BASICS', 'ext_data')
 # whether the 'data' used in the code is generated internally (e.g synthetic tests), or taken from an external source (e.g. real data)
 
@@ -202,13 +203,12 @@ class SignalParameters():
 
 	def essentials(self):
 
-		print("From SignalParameters in config: ")
-
 		self.fhz = np.fft.fftfreq(self.nsam,self.dt)
 		self.n_nn_fsam = len(self.fhz[self.fhz>=0])
 		# number_of_non-negative_frequency_samples. Remember, when nsam is even, self.n_nn_fsam  is
 		# smaller by one sample: the positive Nyquist is missing.
-		print(self.nsam, self.dt, self.n_nn_fsam)
+		# print("From SignalParameters in config: ")
+		# print(self.nsam, self.dt, self.n_nn_fsam)
 
 		self.omega_rad = 2*np.pi*self.fhz 		# angular frequency, radians
 		self.domega = self.omega_rad[1] - self.omega_rad[0]	# d_self.omega_rad
@@ -224,7 +224,7 @@ class SignalParameters():
 		assert self.tt.size == self.nsam
 
 	#-------------------------------------------------------------------------------
-	def power_spectrum(self):
+	def power_spectrum_synthetic(self):
 
 		pss_type = {1: self.pspec_nb,		# narrow band
 						2: self.pspec_bb}	# broad band
@@ -233,14 +233,6 @@ class SignalParameters():
 			self.pow_spec_sources = pss_type[self.pst](self.cf, self.fsigma)
 		elif self.pst==2:
 			self.pow_spec_sources = pss_type[self.pst](self.lf, self.hf, self.altukey)
-
-		# thresh_pow = (0.01*np.amax(self.pow_spec_sources))/100
-		# freq_pow = self.fhz[self.pow_spec_sources > thresh_pow]
-		# self.fhz_pow_pos = freq_pow[freq_pow>0]
-
-		pow_spec_dB = 10 * np.log10(self.pow_spec_sources/np.max(self.pow_spec_sources))
-		freq_thresh = self.fhz[pow_spec_dB>=-40.0]
-		self.fhz_pow_pos = freq_thresh[freq_thresh>0]
 
 	#-------------------------------------------------------------------------------
 	def pspec_nb(self, f0, fsigma):
@@ -332,15 +324,24 @@ class SignalParameters():
 
 sig_char = SignalParameters()
 sig_char.essentials()
-sig_char.power_spectrum()
+sig_char.power_spectrum_synthetic()
 
 #*******************************************************************************
 # GLOBALLY USED FUNCTIONS
 #*******************************************************************************
 
 add_epsilon = lambda m: m + (dom_geom.dx * epsilon)
+mat_to_vec = lambda m: np.tril(m).flatten(order='F')
 main_box_from_omost = lambda m: m[...,mainstart_om:mainend_om,mainstart_om:mainend_om]
 
+#-------------------------------------------------------------------------------
+
+def sig_thresh_dB(x, y, dB_thresh=-40):
+
+	sig_dB = 10 * np.log10(y/np.max(y))
+	x_thresh = x[sig_dB>=dB_thresh]
+	return x_thresh[x_thresh>0]
+	
 #-------------------------------------------------------------------------------
 
 def box_indices_largerbox_src(slx, sly, ngp_mod=dom_geom.ngp_box):
