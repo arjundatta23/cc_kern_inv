@@ -8,7 +8,8 @@ epsilon=1e-6
 # Data availability
 ################################################################################
 [BASICS]
-ext_data=False
+nrecs = 10
+ext_data = False
 # whether the 'data' used in the code is generated internally (e.g. synthetic tests), or taken from an external source (e.g. real data)
 
 #*******************************************************************************
@@ -37,13 +38,13 @@ cc_component_RTZ = 8
 # Parameters pertaining to inversion
 ################################################################################
 [INVC]
-gamma_inv = 0.1
+gamma_inv = 0.001
 
 ################################################################################
 # Parameters pertaining to internally generated data (synthetic tests)
 ################################################################################
 [SYN_DATA]
-noise_amp_pcent = 10
+noise_amp_pcent = 0
 noise_band = 0.05 1.0
 outer_box_size_factor = 2
 
@@ -67,7 +68,7 @@ num_samples = 600
 pow_spec_type = 1
 # ---- Parameters relevant to a GAUSSIAN spectrum
 # centre frequency
-freq_centre = 0.1
+freq_centre = 0.2
 # width (sigma) for gaussian spectrum as a fraction of centre frequency
 freq_bw_frac = 4
 # ---- Parameters relevant to a TUKEY spectrum
